@@ -4,6 +4,9 @@
 // (js/game.js observe_character). The local stack is a git-ignored clone, so a small generated block
 // appended to js/game.js is enough to make /?watch=<name> work - and appending to a static file means
 // no template cache or server restart is involved, one page reload is enough.
+//
+// The cloned client files are served with a 30-day cache (workspace common/init.js), so a page that
+// loaded the previous game.js keeps running it: after a re-patch, hard-reload once (Ctrl+Shift+R).
 
 import fs from "node:fs/promises";
 import path from "node:path";

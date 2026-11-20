@@ -9,8 +9,12 @@
 // follows natively, and every other panel is hidden.
 (function () {
 	var params = new URLSearchParams(window.location.search);
-	var wanted = params.get("watch") || params.get("observe");
-	if (!wanted) return;
+	var wanted = params.get("watch") || params.get("observe") || "";
+	// ?relay=1 means the relay on this machine (npm run live:relay); ?relay=<url> is explicit.
+	var relayParam = params.get("relay");
+	var relayUrl = relayParam === "1" || relayParam === "on" ? "http://127.0.0.1:7899" : /^https?:\/\//.test(relayParam || "") ? String(relayParam).replace(/\/+$/, "") : null;
+	window.__watchShim = { wanted: wanted, relayUrl: relayUrl, search: window.location.search };
+	if (!wanted && !relayUrl) return;
 
 	var attached = null;
 	var lastRefresh = 0;
@@ -511,6 +515,278 @@
 		}
 	}
 
+	// ---- relay mode: the party plays elsewhere, the page renders what the relay sends ------------
+	//
+	// The local client is a renderer; with ?relay=1 its data source is a local SSE stream instead of
+	// the local game server. Frames are injected through original_onevent - the very function the
+	// socket uses for its own inbound packets (js/game.js keeps a copy before wrapping it) - so the
+	// client's own process_entities(), hit/chat handling, camera and HUD panels run unchanged.
+
+	function inject(event, data) {
+		try {
+			// socket.io buffers onevent() packets while the socket is not connected (receiveBuffer), which
+			// is exactly the relay's situation: the page's own socket may never connect. emitEvent() is
+			// the dispatcher onevent() calls once connected, so it delivers the packet either way.
+			if (socket && typeof socket.emitEvent === "function") {
+				socket.emitEvent([event, data]);
+			} else {
+				var dispatch = typeof original_onevent === "function" ? original_onevent : socket && socket.onevent;
+				if (!dispatch) return false;
+				dispatch.apply(socket, [{ type: 2, nsp: "/", data: [event, data] }]);
+			}
+			window.__watchRelay = window.__watchRelay || { frames: 0, events: 0 };
+			window.__watchRelay.events++;
+			return true;
+		} catch (error) {
+			note("inject " + event + " failed: " + error.message);
+			return false;
+		}
+	}
+
+	function ensureStaleBanner() {
+		var banner = document.getElementById("watch-stale");
+		if (banner) return banner;
+		banner = document.createElement("div");
+		banner.id = "watch-stale";
+		banner.style.cssText =
+			"position: fixed; left: 50%; top: 18px; transform: translateX(-50%); z-index: 40; background: rgba(0,0,0,0.85); " +
+			"border: 3px solid #7a4b3a; color: #f2c1a8; padding: 6px 14px; font: 13px monospace; display: none;";
+		banner.textContent = "no live data - is the relay running (npm run live:relay)?";
+		buildHud().appendChild(banner);
+		return banner;
+	}
+
+	function setStale(stale) {
+		var banner = ensureStaleBanner();
+		banner.style.display = stale ? "block" : "none";
+	}
+
+	function ensurePartyPanel() {
+		var panel = document.getElementById("watch-party");
+		if (panel) return panel;
+		panel = document.createElement("div");
+		panel.id = "watch-party";
+		panel.style.cssText =
+			"position: fixed; left: 12px; top: 296px; z-index: 31; background: rgba(8,10,14,0.88); border: 3px solid #444; " +
+			"padding: 7px 9px; font: 12px monospace; color: #d8dee9; pointer-events: none; width: 268px;";
+		buildHud().appendChild(panel);
+		return panel;
+	}
+
+	/** The panel is built once per roster; the numbers are updated in place every frame. */
+	function paintParty(frame) {
+		var panel = ensurePartyPanel();
+		var sources = (frame && frame.sources) || [];
+		if (sources.length < 2) {
+			panel.style.display = "none";
+			return;
+		}
+		panel.style.display = "block";
+		var me = (frame && frame.self) || {};
+		var signature = sources.map(function (entry) { return entry.name + ":" + entry.role; }).join("|");
+		if (panel.dataset.signature !== signature) {
+			panel.dataset.signature = signature;
+			var html = ['<div style="color:#8fbcbb;letter-spacing:1px;margin-bottom:6px">PARTY</div>'];
+			sources.forEach(function (entry) {
+				html.push(
+					'<div class="wp-row" data-name="' + entry.name + '" style="margin-bottom:7px">' +
+						'<div style="display:flex;justify-content:space-between;gap:6px">' +
+						'<span class="wp-name" style="color:#e6edf3"></span>' +
+						'<span class="wp-role" style="color:#6e7681"></span>' +
+						"</div>" +
+						'<div class="wp-hp" style="height:5px;background:#262b33;margin-top:2px"><i style="display:block;height:5px;background:#6fbf73"></i></div>' +
+						'<div class="wp-mp" style="height:3px;background:#262b33;margin-top:1px"><i style="display:block;height:3px;background:#5a9bd5"></i></div>' +
+						'<div class="wp-meta" style="color:#9aa5b1;font-size:11px;margin-top:2px"></div>' +
+						'<div class="wp-stats" style="color:#7f8894;font-size:11px"></div>' +
+						"</div>",
+				);
+			});
+			panel.innerHTML = html.join("");
+		}
+		var rows = panel.querySelectorAll(".wp-row");
+		for (var i = 0; i < rows.length; i++) {
+			var row = rows[i];
+			var entry = null;
+			for (var j = 0; j < sources.length; j++) if (sources[j].name === row.dataset.name) entry = sources[j];
+			if (!entry) continue;
+			row.querySelector(".wp-name").textContent = entry.name;
+			row.querySelector(".wp-role").textContent = entry.role || "";
+			var hp = row.querySelector(".wp-hp i");
+			var mp = row.querySelector(".wp-mp i");
+			if (hp) hp.style.width = (entry.max_hp ? Math.round((entry.hp / entry.max_hp) * 100) : 0) + "%";
+			if (mp) mp.style.width = (entry.max_mp ? Math.round((entry.mp / entry.max_mp) * 100) : 0) + "%";
+			var distance = Math.round(Math.sqrt(Math.pow((entry.x || 0) - (me.x || 0), 2) + Math.pow((entry.y || 0) - (me.y || 0), 2)));
+			row.querySelector(".wp-meta").textContent =
+				Math.round(entry.hp || 0) + "/" + Math.round(entry.max_hp || 0) + " hp   " + Math.round(entry.mp || 0) + " mp   " + distance + "u   " + Math.round(entry.gold || 0) + "g";
+			var counters = entry.counters || {};
+			row.querySelector(".wp-stats").textContent =
+				"atk " + (counters.attacks || 0) + "  kills " + (counters.kills || 0) + "  chests " + (counters.chests || 0) + "  sent " + (counters.sent || 0) + "  sold " + (counters.sold || 0);
+			row.style.opacity = entry.name && me.id && String(entry.name).toLowerCase() === String(me.id).toLowerCase() ? "1" : "0.85";
+		}
+	}
+
+
+	/** One merged frame from the relay becomes the packets the client already knows how to handle. */
+	function applyFrame(frame) {
+		if (!frame) return;
+		window.__watchLastFrame = Date.now();
+		setStale(false);
+		window.__watchRelay = window.__watchRelay || { frames: 0, events: 0 };
+		window.__watchRelay.frames++;
+		if (!frame.self) return;
+		var self = frame.self;
+		if (!window.__watchSeenSelf) {
+			window.__watchSeenSelf = true;
+			if (!window.__watchTrack) trackWorld({ name: self.id, x: self.x || 0, y: self.y || 0, speed: self.speed || 100 });
+			// The client needs a map before it can draw anything, and it only builds one from "welcome".
+			inject("welcome", {
+				map: self.map || "main",
+				in: self.in || self.map || "main",
+				x: self.x || 0,
+				y: self.y || 0,
+				region: "live",
+				name: "relay",
+				S: {},
+				pvp: 0,
+				gameplay: "normal",
+			});
+			window.__watchEventN = 0;
+			window.__watchIds = {};
+			// The welcome handler builds the game surface; if it could not (no map data yet), try once
+			// more now that the character and its map are known.
+			if (typeof game_loaded !== "undefined" && !game_loaded && typeof launch_game === "function") {
+				try {
+					launch_game();
+				} catch (error) {
+					note("launch_game failed: " + error.message);
+				}
+			}
+		} else if (self.map && typeof current_map !== "undefined" && self.map !== current_map) {
+			// The party changed map: rebuild the world view for the new one.
+			inject("new_map", { name: self.map, in: self.in || self.map, x: self.x || 0, y: self.y || 0 });
+		}
+		window.observing = self;
+		// The client's handler drops any entity packet whose "in" is not the map it is showing
+		// ("Disregarded stale entities response"), so the map travels with the snapshot.
+		inject("entities", {
+			in: self.in || self.map,
+			players: (frame.entities && frame.entities.players) || [],
+			monsters: (frame.entities && frame.entities.monsters) || [],
+			npcs: (frame.entities && frame.entities.npcs) || [],
+		});
+		// Anything that was here and is not any more has left the world: tell the client, or it keeps
+		// animating a ghost at its last destination.
+		var present = {};
+		for (var list in { players: 1, monsters: 1, npcs: 1 }) {
+			((frame.entities && frame.entities[list]) || []).forEach(function (entity) {
+				if (entity && entity.id !== undefined) present[String(entity.id)] = true;
+			});
+		}
+		Object.keys(window.__watchIds || {}).forEach(function (id) {
+			if (present[id]) return;
+			delete window.__watchIds[id];
+			inject("disappear", { id: id });
+		});
+		Object.keys(present).forEach(function (id) {
+			window.__watchIds[id] = true;
+		});
+		// Events are a replay buffer on the relay: inject only what this page has not seen yet.
+		var events = frame.events || [];
+		for (var i = 0; i < events.length; i++) {
+			var event = events[i];
+			if (!event || typeof event.n !== "number" || event.n <= window.__watchEventN) continue;
+			window.__watchEventN = event.n;
+			if (event.name && event.data) inject(event.name, event.data);
+		}
+		paintParty(frame);
+	}
+
+	function pinCameraToTrack() {
+		var originalPositionMap = window.position_map;
+		if (window.__watchPinned || typeof originalPositionMap !== "function") return;
+		window.__watchPinned = true;
+		window.position_map = function () {
+			originalPositionMap();
+			var state = window.__watchTrack;
+			if (!state || typeof map === "undefined" || !map) return;
+			var live = observing && typeof entities !== "undefined" ? entities[observing.id] : null;
+			map.real_x = live && live.real_x !== undefined ? live.real_x : state.x;
+			map.real_y = live && live.real_y !== undefined ? live.real_y : state.y;
+		};
+	}
+
+	function startRelay() {
+		if (window.EventSource) {
+			try {
+				if (window.__watchSource) window.__watchSource.close();
+				var url = relayUrl + "/events" + (wanted ? "?watch=" + encodeURIComponent(wanted) : "");
+				var source = new EventSource(url);
+				window.__watchSource = source;
+				source.addEventListener("frame", function (event) {
+					var frame = null;
+					try {
+						frame = JSON.parse(event.data);
+					} catch (error) {
+						return;
+					}
+					applyFrame(frame);
+				});
+				source.onerror = function () {
+					setStale(true);
+				};
+				note("relay " + url);
+			} catch (error) {
+				note("relay failed: " + error.message);
+			}
+		}
+		if (window.__watchStaleTimer) clearInterval(window.__watchStaleTimer);
+		window.__watchStaleTimer = setInterval(function () {
+			setStale(!window.__watchLastFrame || Date.now() - window.__watchLastFrame > 5000);
+		}, 1000);
+	}
+
+	function attachRelay() {
+		attached = wanted || "relay";
+		// The game surface is built by the injected "welcome" (its handler calls launch_game once the
+		// map is known); calling it here, before any map exists, only throws.
+		try {
+			window.inside = "game";
+		} catch (error) {
+			note("could not enter game mode: " + error.message);
+		}
+		ensureSkillsPanel();
+		ensureLogPanel();
+		ensureBuffsPanel();
+		ensurePartyPanel();
+		pinCameraToTrack();
+		document.title = "watching " + (wanted || "the party") + " (live)";
+		note("relay mode: " + (wanted || "newest publisher") + " from " + relayUrl);
+		startRelay();
+		if (window.__watchLoop) clearInterval(window.__watchLoop);
+		var lastPaint = 0;
+		window.__watchLoop = setInterval(function () {
+			if (typeof observing === "undefined" || !observing) return;
+			var state = advance(window.__watchTrack, Date.now());
+			var view = adoptLivingEntity(observing);
+			view.real_x = state.x;
+			view.real_y = state.y;
+			if (state.bind) state.bind();
+			buildSkills(view);
+			paintSkills(view);
+			paintBuffs(view);
+			if (!lastPaint || Date.now() - lastPaint > 1000) {
+				paintHud();
+				lastPaint = Date.now();
+			}
+		}, 50);
+		// A watched character that is dead or gone still needs a camera anchor.
+		window.localWatch = function () {
+			startRelay();
+			return true;
+		};
+		return true;
+	}
+
 	function attach(watched) {
 		// Upstream flow, unchanged: the connection carries desktop=1, which the server answers with an
 		// observer placed 120px below the player ("welcome"/o:home: player.y + 120). That offset is
@@ -610,7 +886,40 @@
 	}
 
 	function bootstrap() {
-		if (typeof observe_character !== "function" || typeof socket === "undefined" || !socket) return;
+		if (relayUrl && (typeof socket === "undefined" || !socket)) {
+			// The landing page never creates a socket (only a login does), and relay mode does not need a
+			// connection at all: init_socket() is what registers the client's packet handlers on a socket
+			// object, and the frames are injected through original_onevent. Point it at this origin so the
+			// attempt fails immediately, and stop it retrying.
+			try {
+				if (typeof init_socket === "function") {
+					if (typeof server_address === "undefined" || !server_address) window.server_address = window.location.origin;
+					if (typeof server_path === "undefined" || !server_path) window.server_path = "/socket.io/";
+					init_socket();
+					if (socket && socket.io && socket.io.opts) socket.io.opts.reconnection = false;
+				}
+			} catch (error) {
+				note("init_socket for relay mode failed: " + error.message);
+			}
+			return;
+		}
+		if (typeof socket === "undefined" || !socket) return;
+		// Relay mode needs no session and no secret: the page is a renderer, the relay is the source.
+		if (relayUrl) {
+			// Relay mode does not care whether the page's own socket ever connects: the socket object is
+			// only needed because init_socket() registers the client's packet handlers on it, and the
+			// frames are injected through original_onevent. Only the assets have to be in, because the
+			// sprites and map tiles come from them.
+			if (typeof resources_loaded !== "undefined" && !resources_loaded) return;
+			if (attached) {
+				clearInterval(timer);
+				return;
+			}
+			clearInterval(timer);
+			if (!attachRelay()) note("could not attach the relay stream");
+			return;
+		}
+		if (typeof observe_character !== "function") return;
 		// init_socket refuses to reconnect while the page's first connection is still in flight
 		// ("!socket_welcomed"), and attaching then leaves an observer that never receives entities.
 		if (typeof socket_welcomed !== "undefined" && !socket_welcomed) return;

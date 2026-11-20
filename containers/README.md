@@ -51,3 +51,16 @@ into the clone fails with `EACCES`.
 
 The client page is served by the backend: `http://127.0.0.1:8090/?watch=<character>`. The `?watch=` deep link comes
 from `scripts/local/patch_client.mjs`, which appends a small shim to the served `js/game.js` at every start.
+
+### Watching a party that plays elsewhere (relay mode)
+
+The page can also render characters that are **not** connected to this container: `/?watch=<name>&relay=1`
+reads a Server-Sent-Events stream from a local relay instead of the game server's own stream. The relay and
+the party side live in [adventureland-client](https://github.com/DionJones615/adventureland-client)
+(`npm run live:relay`, `examples/live-party/`); the shim merges what each running client sees into one view.
+
+- no local login is needed: relay mode creates the client's socket object only so `init_socket()` registers
+  its packet handlers, then delivers the relay's frames through `socket.emitEvent()`;
+- everything visual is the client's own code (map, sprites, camera follow, panels);
+- a **PARTY** panel lists every publisher with hp/mp, distance, gold and the run's counters;
+- `relay=<url>` points at another relay; without it the observer path above is used unchanged.
