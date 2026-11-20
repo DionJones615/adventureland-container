@@ -27,6 +27,18 @@ dependencies (`npm ci` in `adventureland/` and `adventureland/node/` - the game 
 `node/package.json`). That needs network and a few minutes; mount `/app/reference/local` to reuse a prepared clone.
 Game data (`data.js`) is fetched during the image build.
 
+A matching client image (protocol client + bot runner, with **loop scripts mounted** at run time) lives at
+[DionJones615/adventureland-client](https://github.com/DionJones615/adventureland-client); its CI pulls this image and
+runs e2e against it. Pair them on one docker network:
+
+```sh
+docker network create al
+docker run -d --network al --name al-game -p 8090:8090 -p 7192:7192 ghcr.io/dionjones615/adventureland-container:latest
+docker run --rm --network al -e AL_API=http://al-game:8090 -e AL_GAME_ADDRESS=al-game:7192 \
+  -e AL_BOT_CHARACTER=Devmage -v "$PWD/loops:/loops:ro,z" -e BOT_LOOP=/loops/mine.mjs \
+  ghcr.io/dionjones615/adventureland-client:latest
+```
+
 ## With the helper script
 
 ```sh
