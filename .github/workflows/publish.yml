@@ -1,0 +1,64 @@
+name: publish
+
+# Publishes the game image so other repositories (adventureland-client) can pull it instead of
+# building the stack from source. Pinned tags (sha-<short>) are there for consumers that want
+# reproducibility; :latest follows main.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: image name
+        run: |
+          owner=$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/${owner}/adventureland-container" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: build
+        run: docker build -f containers/game.Dockerfile -t "$IMAGE:smoke" .
+
+      - name: smoke test before publishing
+        run: |
+          set -euo pipefail
+          mkdir -p "$PWD/.publish-clone"
+          docker run -d --name al-publish \
+            -p 18090:8090 -p 17192:7192 \
+            -e DEFAULT_EMAIL=dev@example.test -e DEFAULT_PASSWORD=dev-password-123 \
+            -v "$PWD/.publish-clone:/app/reference/local:z" \
+            "$IMAGE:smoke"
+          ok=""
+          for i in $(seq 1 100); do
+            if curl -fsS -X POST -H 'content-type: application/json' \
+                 -d '{"email":"dev@example.test","password":"dev-password-123"}' \
+                 http://127.0.0.1:18090/api/signup_or_login | grep -q '"success":true'; then ok=1; break; fi
+            sleep 6
+          done
+          if [ -z "$ok" ]; then echo "published image never served a login"; docker logs al-publish | tail -80; exit 1; fi
+
+      - name: log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: tag and push
+        run: |
+          docker tag "$IMAGE:smoke" "$IMAGE:latest"
+          docker tag "$IMAGE:smoke" "$IMAGE:sha-${SHORT_SHA}"
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:sha-${SHORT_SHA}"
+          echo "pushed $IMAGE:latest and $IMAGE:sha-${SHORT_SHA}"
+
+      - name: clean up
+        if: always()
+        run: docker rm -f al-publish || true
