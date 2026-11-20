@@ -39,6 +39,11 @@ docker run --rm --network al -e AL_API=http://al-game:8090 -e AL_GAME_ADDRESS=al
   ghcr.io/dionjones615/adventureland-client:latest
 ```
 
+The client repository also contains a full worked example: **three characters and a merchant playing as one
+party**, as a four-container compose file with its own fixtures and party loops -
+[`examples/party`](https://github.com/DionJones615/adventureland-client/tree/main/examples/party). It needs the sell
+point described below.
+
 ## With the helper script
 
 ```sh
