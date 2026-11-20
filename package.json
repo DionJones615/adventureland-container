@@ -1,0 +1,31 @@
+{
+  "name": "adventureland-container",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Adventure Land game stack as a container: MongoDB + backend + game server, with seeded accounts and character fixtures for e2e tests",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "container:build": "node scripts/local/podman.mjs build",
+    "container:up": "node scripts/local/podman.mjs up",
+    "container:down": "node scripts/local/podman.mjs down",
+    "container:status": "node scripts/local/podman.mjs status",
+    "container:logs": "node scripts/local/podman.mjs logs",
+    "fetch-data": "node scripts/fetch_game_data.mjs",
+    "seed:account": "node scripts/local/seed_account.mjs",
+    "seed:fixtures": "node scripts/local/seed_fixtures.mjs",
+    "local:fetch": "bash scripts/local/fetch_stack.sh",
+    "local:up": "node scripts/local/stack.mjs up",
+    "local:down": "node scripts/local/stack.mjs down",
+    "local:status": "node scripts/local/stack.mjs status",
+    "local:logs": "node scripts/local/stack.mjs logs",
+    "test": "npm run test:unit",
+    "test:unit": "node --test test/unit/*.test.mjs"
+  },
+  "dependencies": {
+    "mongodb-memory-server": "^10.2.0"
+  }
+}

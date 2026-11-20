@@ -1,0 +1,651 @@
+// Deep link for the local stack: /?watch=<Character>.
+//
+// Upstream has no URL parameter for watching: the client parses no query string, and the watch view is
+// reachable only by clicking a character (js/game.js observe_character). This file is appended to the
+// cloned js/game.js by scripts/local/patch_client.mjs so a URL can do the same thing.
+//
+// It also builds a watch HUD: the observed character is handed to the client as "character", so the
+// official inventory (render_inventory) and equipment (render_slots) renderers do the work, the camera
+// follows natively, and every other panel is hidden.
+(function () {
+	var params = new URLSearchParams(window.location.search);
+	var wanted = params.get("watch") || params.get("observe");
+	if (!wanted) return;
+
+	var attached = null;
+	var lastRefresh = 0;
+	var readyAt = 0;
+	var timer = setInterval(bootstrap, 500);
+
+	function note(text) {
+		console.log("[local_watch] " + text);
+		if (window.add_log) {
+			try {
+				add_log(text, "#83BDCF");
+			} catch (e) {}
+		}
+	}
+
+	function matches(entry) {
+		return entry && String(entry.name).toLowerCase() === wanted.toLowerCase();
+	}
+
+	/** servers_and_characters keeps the characters, secrets included, inside infs[]. */
+	function refreshCharacters() {
+		if (Date.now() - lastRefresh < 3000) return;
+		lastRefresh = Date.now();
+		fetch("/api/servers_and_characters", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })
+			.then(function (response) {
+				return response.json();
+			})
+			.then(function (body) {
+				var entry = ((body && body.infs) || []).filter(function (info) {
+					return info && info.type === "servers_and_characters";
+				})[0];
+				if (!entry) return;
+				window.X = window.X || {};
+				window.X.characters = entry.characters || [];
+				window.X.servers = entry.servers || window.X.servers;
+			})
+			.catch(function () {});
+	}
+
+	/**
+	 * Hide every sibling of the canvas' ancestor chain: the landing panels, the tutorial/news column,
+	 * the chat and skillbar containers - everything except the canvas and our HUD.
+	 */
+	function hideEverythingElse(hud) {
+		var keep = [hud, document.getElementById("watch-skills"), document.getElementById("watch-buffs"), document.getElementById("gamelog")];
+		var canvas = document.querySelector("canvas");
+		if (!canvas) return;
+		var chain = new Set();
+		var node = canvas;
+		while (node && node !== document.body) {
+			chain.add(node);
+			node = node.parentElement;
+		}
+		var containers = [document.body].concat(Array.prototype.slice.call(chain));
+		containers.forEach(function (parent) {
+			Array.prototype.slice.call(parent.children).forEach(function (child) {
+				if (chain.has(child) || child === hud || hud.contains(child)) return;
+				if (keep.some(function (node) { return node && node.contains(child); })) return;
+				if (/^(SCRIPT|STYLE|LINK|TEMPLATE)$/.test(child.tagName)) return;
+				child.style.display = "none";
+			});
+		});
+	}
+
+	function panel(id, style) {
+		var existing = document.getElementById(id);
+		if (existing) return existing;
+		var element = document.createElement("div");
+		element.id = id;
+		element.style.cssText =
+			"position: fixed; z-index: 30; background: rgba(0,0,0,0.85); border: 3px solid #444; padding: 3px; " + style;
+		return element;
+	}
+
+	/**
+	 * Give the client the observed character as "character": the camera reads character.real_x every
+	 * frame, and the inventory/equipment renderers read character.items/slots. It is a stable proxy
+	 * object refreshed from the live entity, not the entity itself - the entity's real_x is only
+	 * maintained while it is being drawn, and copying that (possibly undefined) value once froze the
+	 * camera on a null coordinate.
+	 */
+	function adoptLivingEntity(watched) {
+		var live = (typeof entities !== "undefined" && entities && entities[watched.id]) || {};
+		var view = window.__watchView || (window.__watchView = {});
+		Object.assign(view, watched, live);
+		if (!live.items) view.items = (watched.items || []).slice();
+		if (!live.slots) view.slots = Object.assign({}, watched.slots || {});
+		if (view.isize === undefined) view.isize = watched.isize || 42;
+		if (view.gold === undefined) view.gold = watched.gold || 0;
+		if (view.cash === undefined) view.cash = watched.cash || 0;
+		view.real_x = live.real_x === undefined ? (live.x === undefined ? watched.x : live.x) : live.real_x;
+		view.real_y = live.real_y === undefined ? (live.y === undefined ? watched.y : live.y) : live.real_y;
+		// draw_entities() culls every entity outside the receiving character's vision box, and a real
+		// character gets one at login (js/game.js start: "if (!data.vision) character.vision = [700, 500]").
+		// Without it the entities that process_entities() creates are deleted again on the next frame,
+		// which is why the watch view rendered nothing but tiles.
+		// Keep the client from treating this proxy as "me": process_entities() skips creating an entity
+		// for the player whose id matches character.id ("if (character && character.id == player.id)
+		// continue"), so claiming the watched id made the character itself invisible. The renderers only
+		// need ctype/items/slots, never the id.
+		view.id = "__watch__";
+		view.vision = view.vision || watched.vision || [700, 500];
+		view.map = view.map || watched.map || (typeof current_map !== "undefined" ? current_map : null);
+		view.in = view.in || watched.in || (typeof current_in !== "undefined" ? current_in : null);
+		// Deliberately NOT installed as window.character. draw() ends with
+		// "if (character) update_sprite(character)", and this proxy is a plain object with no PIXI
+		// texture: cosmetics_logic() would throw on sprite.texture.width, and because
+		// requestAnimationFrame(draw) is the LAST statement of draw(), one throw stops the render loop
+		// for good - which is what froze every entity in place. paintHud() installs it only for the
+		// duration of the inventory/equipment renderers, which are the ones that need it.
+		return view;
+	}
+
+	function buildHud() {
+		var hud = document.getElementById("watch-hud");
+		if (!hud) {
+			hud = document.createElement("div");
+			hud.id = "watch-hud";
+			hud.style.cssText = "position: fixed; inset: 0; pointer-events: none; z-index: 30;";
+			hud.appendChild(panel("watch-equipment", "top: 12px; right: 12px; pointer-events: auto;"));
+			hud.appendChild(panel("watch-inventory", "bottom: 12px; right: 12px; pointer-events: auto;"));
+			document.body.appendChild(hud);
+		}
+		return hud;
+	}
+
+	/** Render with the official renderers, then move their output into the HUD. */
+	function paintHud() {
+		var view = window.__watchView;
+		if (!view) return;
+		var hud = buildHud();
+		// The renderers read window.character; install the proxy for just this call so the draw loop
+		// never hands it to update_sprite (see adoptLivingEntity).
+		var previousCharacter = window.character;
+		window.character = view;
+		try {
+			if (typeof render_inventory === "function") {
+				if (window.inventory) render_inventory(true);
+				else {
+					window.inventory = false;
+					render_inventory();
+				}
+				var inventory = document.querySelector(".theinventory");
+				if (inventory) document.getElementById("watch-inventory").appendChild(inventory);
+			}
+			if (typeof render_slots === "function") {
+				render_slots(window.character, {});
+				var slots = document.querySelector(".slots");
+				if (slots) document.getElementById("watch-equipment").appendChild(slots);
+			}
+		} catch (error) {
+			note("hud render failed: " + error.message);
+		} finally {
+			window.character = previousCharacter;
+		}
+		hideEverythingElse(hud);
+	}
+
+	/**
+	 * The client's entity table only fills up once the game surface exists, and an observer never really
+	 * gets one - "observing" itself is a frozen snapshot of the welcome packet. So follow the character
+	 * from the socket events: entity packets carry position and destination, and new_map (emitted by the
+	 * o:home recenter) carries the tile the observer was moved to.
+	 */
+	function trackWorld(watched) {
+		var state = (window.__watchTrack = {
+			x: watched.x,
+			y: watched.y,
+			speed: watched.speed || 100,
+			moving: false,
+			going_x: watched.x,
+			going_y: watched.y,
+			stamp: Date.now(),
+		});
+		function merge(entity) {
+			if (!entity || String(entity.id).toLowerCase() !== String(watched.name).toLowerCase()) return;
+			if (entity.x !== undefined) {
+				state.x = entity.x;
+				state.y = entity.y;
+			}
+			if (entity.speed) state.speed = entity.speed;
+			// Buffs/debuffs: the server sends the status map ("s": {condition: {ms, ...}}) and the
+			// condition map ("c") on entity updates. Keep both, plus when we first saw each entry so the
+			// remaining time can be ticked down locally between packets.
+			state.seenAt = state.seenAt || {};
+			if (entity.s || entity.c) {
+				var now = Date.now();
+				var next = Object.assign({}, entity.c || {}, entity.s || {});
+				Object.keys(next).forEach(function (name) {
+					var ms = next[name] && next[name].ms;
+					var previous = state.seenAt[name];
+					if (!previous || previous.ms !== ms) state.seenAt[name] = { ms: ms, at: now };
+				});
+				Object.keys(state.seenAt).forEach(function (name) {
+					if (!(name in next)) delete state.seenAt[name];
+				});
+				state.s = entity.s || state.s || {};
+				state.c = entity.c || state.c || {};
+				state.statuses = next;
+			}
+			if (entity.going_x !== undefined) {
+				state.going_x = entity.going_x;
+				state.going_y = entity.going_y;
+				state.moving = Boolean(entity.moving);
+			} else if (entity.moving === false) {
+				state.moving = false;
+			}
+			state.stamp = Date.now();
+		}
+		// attach() destroys the page's socket before reconnecting, so the handlers must be bound to
+		// whichever socket exists *after* the observe connect - hence the late bind() below.
+		state.bind = function () {
+			if (!socket || !socket.on || state.bound === socket) return;
+			state.bound = socket;
+			socket.on("entities", function (data) {
+				if (!data) return;
+				[data.players, data.monsters].forEach(function (list) {
+					(list || []).forEach(merge);
+				});
+			});
+			socket.on("u", merge);
+			socket.on("player", merge);
+			// Skill activations: the server broadcasts "action" for attacks and skills to nearby observers
+			// (source carries the skill name), and "skill_timeout" when the character's own socket is told
+			// about a cooldown. Both are recorded so the panel can flash and count down.
+			window.__watchUses = window.__watchUses || {};
+			socket.on("action", function (data) {
+				if (!data || !data.attacker) return;
+				if (String(data.attacker).toLowerCase() !== String(watched.name).toLowerCase()) return;
+				var name = data.source || data.type || "attack";
+				window.__watchUses[name] = Date.now();
+				window.__watchUses.attack = window.__watchUses.attack || Date.now();
+			});
+			socket.on("skill_timeout", function (data) {
+				if (!data || !data.name) return;
+				window.__watchUses[data.name] = Date.now();
+			});
+			// Log transcript: chat, and the combat the watcher actually cares about.
+			var nameOf = String(watched.name).toLowerCase();
+			socket.on("chat_log", function (data) {
+				if (!data || typeof data.message !== "string") return;
+				logLine((data.owner || data.id || "?") + ": " + data.message, "#e8e8e8");
+			});
+			socket.on("hit", function (data) {
+				if (!data) return;
+				var hitter = String(data.hid || data.attacker || "").toLowerCase();
+				var target = String(data.id || "").toLowerCase();
+				var damage = Math.round(data.damage || 0);
+				if (hitter === nameOf) logLine(watched.name + " hit " + data.id + " for " + damage, "#f0c674");
+				else if (target === nameOf) logLine(data.hid || data.attacker || "?" + " hit " + watched.name + " for " + damage, "#cf6b5b");
+			});
+			socket.on("action", function (data) {
+				if (!data || String(data.attacker || "").toLowerCase() !== nameOf) return;
+				var source = data.source || data.type;
+				if (source && source !== "attack") logLine(watched.name + " used " + source, "#83BDCF");
+			});
+			socket.on("new_map", function (data) {
+				if (!data) return;
+				state.x = data.x;
+				// The query carries desktop=1, and the server places such an observer 120px below the
+				// player; without this the camera sits a character-height low and the character is drawn
+				// near the top of the screen.
+				state.y = data.y - 120;
+				state.moving = false;
+				state.stamp = Date.now();
+			});
+		};
+		return state;
+	}
+
+	/** Entity packets carry destinations; interpolate between them like the client does. */
+	function advance(state, now) {
+		if (!state.moving) return state;
+		var dt = Math.min(0.5, Math.max(0, (now - state.stamp) / 1000));
+		state.stamp = now;
+		var dx = state.going_x - state.x;
+		var dy = state.going_y - state.y;
+		var distance = Math.sqrt(dx * dx + dy * dy);
+		if (distance < 1) {
+			state.moving = false;
+			return state;
+		}
+		var step = Math.min(distance, state.speed * dt);
+		state.x += (dx / distance) * step;
+		state.y += (dy / distance) * step;
+		return state;
+	}
+
+	/** The skills this character can use: attack plus every class skill in G.skills. */
+	function skillsFor(view) {
+		var names = ["attack"];
+		var skills = (typeof G !== "undefined" && G.skills) || {};
+		Object.keys(skills).forEach(function (name) {
+			var skill = skills[name];
+			if (skill && skill.type === "skill" && (skill.class || []).indexOf(view.ctype) !== -1) names.push(name);
+		});
+		return names;
+	}
+
+	/**
+	 * Cooldown of a skill in ms, resolved the way the game does it
+	 * (js/functions.js skill_timeout_singular: cooldown, reuse_cooldown, shared cooldown, attack frequency).
+	 */
+	function skillCooldownMs(name, view) {
+		var skills = (typeof G !== "undefined" && G.skills) || {};
+		var skill = skills[name];
+		if (!skill) return 0;
+		if (skill.cooldown) return skill.cooldown;
+		if (skill.reuse_cooldown) return skill.reuse_cooldown;
+		if (skill.share && skills[skill.share]) return (skills[skill.share].cooldown || 0) * (skill.cooldown_multiplier || 1);
+		if (name === "attack" && view && view.frequency) return 1000 / view.frequency;
+		return 0;
+	}
+
+	function ensureSkillsPanel() {
+		var panel = document.getElementById("watch-skills");
+		if (panel) return panel;
+		panel = document.createElement("div");
+		panel.id = "watch-skills";
+		panel.style.cssText =
+			"position: fixed; left: 12px; bottom: 12px; z-index: 31; background: rgba(0,0,0,0.85); border: 3px solid #444; " +
+			"padding: 6px; display: flex; gap: 6px; pointer-events: none; width: max-content; height: auto; " +
+			"align-items: flex-start; flex-wrap: nowrap;";
+		var style = document.createElement("style");
+		// !important throughout: the client re-styles #gamelog as it logs, and plain inline styles lose.
+		style.textContent =
+			"#watch-skills .wsk.on{border-color:#ffd166!important;box-shadow:0 0 10px #ffd166}" +
+			"#watch-skills .wsk{position:relative;width:48px;text-align:center;border:2px solid #555;background:#000}" +
+			"#gamelog{position:fixed!important;left:12px!important;top:12px!important;width:360px!important;" +
+			"height:200px!important;overflow-y:scroll!important;z-index:31!important;border:3px solid #444!important;" +
+			"padding:4px!important;background:rgba(0,0,0,0.85)!important;pointer-events:none!important;display:block!important}";
+		document.head.appendChild(style);
+		// Mount inside the HUD, creating it first: a body-level panel would be hidden by
+		// hideEverythingElse() on its next pass (it only spares the canvas chain and the HUD).
+		var hud = buildHud();
+		hud.appendChild(panel);
+		ensureLogPanel();
+		return panel;
+	}
+
+	function buildSkills(view) {
+		var panel = ensureSkillsPanel();
+		var names = skillsFor(view);
+		var signature = names.join(",");
+		if (panel.dataset.signature === signature) return panel;
+		panel.dataset.signature = signature;
+		panel.innerHTML = names
+			.map(function (name) {
+				var skill = (typeof G !== "undefined" && G.skills && G.skills[name]) || {};
+				var icon = "";
+				try {
+					// G.images has no entry for skill skins, so sprite() renders nothing; item_container is
+					// what the game's own skillbar uses for these icons.
+					// No skid: item_container prints the skid as a keymap label, and we draw our own cooldown.
+					icon = item_container({ skin: skill.skin || name, draggable: false, size: 40 });
+				} catch (error) {
+					icon = "";
+				}
+				return (
+					'<div class="wsk" data-skill="' + name + '">' +
+					'<div style="width:48px;height:48px;overflow:hidden;margin:0 auto">' + icon + "</div>" +
+					'<div class="cd" style="position:absolute;left:0;top:0;width:48px;background:rgba(0,0,0,0.72);height:0%"></div>' +
+					'<div class="left" style="position:absolute;left:0;top:0;width:48px;height:48px;line-height:48px;color:#ffd166;font-size:15px;text-shadow:0 0 4px #000"></div>' +
+					'<div style="font-size:10px;color:#bbb;line-height:12px;height:12px;overflow:hidden;white-space:nowrap">' +
+					(skill.name || name) +
+					"</div></div>"
+				);
+			})
+			.join("");
+		return panel;
+	}
+
+	/** Cooldown fill, remaining seconds, and a flash for the skill that was just used. */
+	function paintSkills(view) {
+		var panel = document.getElementById("watch-skills");
+		if (!panel) return;
+		var now = Date.now();
+		var uses = window.__watchUses || {};
+		var cells = panel.querySelectorAll(".wsk");
+		for (var i = 0; i < cells.length; i++) {
+			var cell = cells[i];
+			var name = cell.getAttribute("data-skill");
+			var used = uses[name] || 0;
+			var total = skillCooldownMs(name, view);
+			var remaining = total ? Math.max(0, total - (now - used)) : 0;
+			var overlay = cell.querySelector(".cd");
+			var label = cell.querySelector(".left");
+			if (overlay) overlay.style.height = Math.round((total ? remaining / total : 0) * 100) + "%";
+			if (label) label.textContent = remaining > 0 ? (remaining / 1000).toFixed(1) : "";
+			cell.classList.toggle("on", now - used < 400);
+		}
+	}
+
+	/** Active buffs/debuffs, with the remaining time ticked down between packets. */
+	function activeStatuses(view) {
+		var state = window.__watchTrack || {};
+		var merged = Object.assign({}, (view && view.c) || {}, (view && view.s) || {}, state.c || {}, state.s || {}, state.statuses || {});
+		var now = Date.now();
+		var out = [];
+		Object.keys(merged).forEach(function (name) {
+			var entry = merged[name] || {};
+			var def = (typeof G !== "undefined" && ((G.conditions && G.conditions[name]) || (G.skills && G.skills[name]))) || null;
+			var skin = entry.skin || (def && def.skin);
+			// The client shows a status when it has a skin, or when the definition is marked as ui
+			// (js/html.js render_conditions).
+			if (!skin) return;
+			// "technical" marks account/plumbing statuses (notverified, authfail) rather than gameplay
+			// effects; a watcher wants the buffs, not the account warnings.
+			if (def && def.technical) return;
+			var total = entry.ms || (def && def.duration) || 0;
+			var seen = state.seenAt && state.seenAt[name];
+			var remaining = total;
+			if (seen && seen.at) remaining = Math.max(0, total - (now - seen.at));
+			out.push({
+				name: name,
+				label: (def && def.name) || name,
+				skin: skin,
+				remaining: remaining,
+				total: total,
+				bad: Boolean(def && (def.debuff || def.bad)),
+			});
+		});
+		return out;
+	}
+
+	/**
+	 * The client's own log panel (#gamelog). It ships with the welcome/update notes and receives whatever
+	 * the client logs; we show it and append the events a watcher cares about (chat, hits, skill use).
+	 */
+	function ensureLogPanel() {
+		var log = document.getElementById("gamelog");
+		if (!log) return null;
+		// Move it into the HUD: its original ancestors are part of the landing layout, which
+		// hideEverythingElse() removes, and a hidden ancestor hides the log regardless of its own styles.
+		var hud = buildHud();
+		if (log.parentElement !== hud) hud.appendChild(log);
+		log.scrollTop = log.scrollHeight;
+		return log;
+	}
+
+	function logLine(text, color) {
+		try {
+			if (typeof add_log === "function") add_log(text, color || "#e8e8e8");
+		} catch (error) {}
+		window.__watchLogCount = (window.__watchLogCount || 0) + 1;
+		var log = ensureLogPanel();
+		if (log) log.scrollTop = log.scrollHeight;
+	}
+
+	function ensureBuffsPanel() {
+		var panel = document.getElementById("watch-buffs");
+		if (panel) return panel;
+		panel = document.createElement("div");
+		panel.id = "watch-buffs";
+		panel.style.cssText =
+			"position: fixed; left: 12px; bottom: 104px; z-index: 31; background: rgba(0,0,0,0.85); border: 3px solid #444; " +
+			"padding: 6px; display: flex; gap: 6px; pointer-events: none; width: max-content; height: auto; align-items: flex-start;";
+		buildHud().appendChild(panel);
+		return panel;
+	}
+
+	function paintBuffs(view) {
+		var panel = ensureBuffsPanel();
+		var statuses = activeStatuses(view);
+		var signature = statuses.map(function (entry) { return entry.name; }).join(",");
+		if (panel.dataset.signature !== signature) {
+			panel.dataset.signature = signature;
+			panel.innerHTML = statuses
+				.map(function (entry) {
+					var icon = "";
+					try {
+						icon = item_container({ skin: entry.skin, draggable: false, size: 34 });
+					} catch (error) {
+						icon = "";
+					}
+					return (
+						'<div class="wbf" data-status="' + entry.name + '" style="position:relative;width:42px;text-align:center">' +
+						'<div style="width:42px;height:42px;overflow:hidden;margin:0 auto">' + icon + "</div>" +
+						'<div class="bar" style="height:4px;background:#222;margin-top:2px"><div style="height:4px;width:100%;background:' +
+						(entry.bad ? "#c0563f" : "#6fbf73") +
+						'"></div></div>' +
+						'<div style="font-size:10px;color:#bbb;line-height:12px;height:12px;overflow:hidden;white-space:nowrap">' +
+						entry.label +
+						"</div></div>"
+					);
+				})
+				.join("");
+			panel.style.display = statuses.length ? "flex" : "none";
+		}
+		var cells = panel.querySelectorAll(".wbf");
+		for (var i = 0; i < cells.length; i++) {
+			var cell = cells[i];
+			var current = statuses[i];
+			if (!current) continue;
+			var ratio = current.total ? Math.max(0, Math.min(1, current.remaining / current.total)) : 0;
+			var fill = cell.querySelector(".bar div");
+			if (fill) fill.style.width = Math.round(ratio * 100) + "%";
+		}
+	}
+
+	function attach(watched) {
+		// Upstream flow, unchanged: the connection carries desktop=1, which the server answers with an
+		// observer placed 120px below the player ("welcome"/o:home: player.y + 120). That offset is
+		// harmless here because "character" is set below: position_map() then re-centres the camera on the
+		// character every frame. Faking is_comm to drop the flag made the server stop streaming entities
+		// to the observer altogether, so it is not an option.
+		// The page's initial observer socket has to go first: reconnecting on top of it leaves the client
+		// with an empty entity table (the world renders, the watched character is never drawn). Tearing
+		// it down, letting the client settle, then observing is the sequence that reliably works.
+		try {
+			if (window.socket) {
+				window.socket.destroy();
+				window.socket = null;
+			}
+			window.observing = null;
+			window.character = null;
+			window.socket_welcomed = false;
+		} catch (error) {
+			note("teardown failed: " + error.message);
+		}
+		var call = null;
+		setTimeout(function () {
+			try {
+				if (!observe_character(watched.name)) note("observe_character refused " + watched.name);
+			} catch (error) {
+				note("observe_character failed: " + error.message);
+			}
+		}, 1200);
+		call = true;
+		// The selection screen has no game surface: entities are received but never entered into the
+		// client's table, so nothing can be followed. Switching to game mode and launching makes the
+		// client build it (this is what the hub does when it opens a character's view).
+		try {
+			window.inside = "game";
+			if (typeof launch_game === "function") launch_game();
+		} catch (error) {
+			note("launch_game failed: " + error.message);
+		}
+		attached = watched.name;
+		ensureSkillsPanel();
+		ensureLogPanel();
+		document.title = "watching " + watched.name;
+		note("watching " + watched.name);
+		// An observer has a fixed position, so the watched character eventually leaves its vision and the
+		// server stops sending its entity - the camera then freezes on the last known tile. "o:home" is
+		// the supported recenter (node/server.js socket.on("o:home") transports the observer to the
+		// player), which keeps the entity stream, and therefore the camera, alive.
+		if (window.__watchRecenter) clearInterval(window.__watchRecenter);
+		window.__watchRecenter = setInterval(function () {
+			try {
+				if (socket && socket.emit) socket.emit("o:home", {});
+			} catch (error) {}
+		}, 5000);
+
+		trackWorld(watched);
+
+		// position_map() runs every frame and re-derives the camera from the client's own state, which for
+		// an observer is the server's +120 desktop offset. Wrap it and re-centre on the tracked character
+		// afterwards, otherwise the two disagree and the character drifts towards the top of the screen.
+		var originalPositionMap = window.position_map;
+		if (!window.__watchPinned && typeof originalPositionMap === "function") {
+			window.__watchPinned = true;
+			window.position_map = function () {
+				originalPositionMap();
+				var state = window.__watchTrack;
+				if (!state || typeof map === "undefined" || !map) return;
+				// Prefer the drawn entity: it carries the interpolated position the sprite is actually
+				// rendered at, so the camera and the sprite cannot disagree.
+				var live = (typeof observing !== "undefined" && observing && typeof entities !== "undefined") ? entities[observing.id] : null;
+				map.real_x = live && live.real_x !== undefined ? live.real_x : state.x;
+				map.real_y = live && live.real_y !== undefined ? live.real_y : state.y;
+			};
+		}
+
+		var lastPaint = 0;
+		var loop = setInterval(function () {
+			if (typeof observing === "undefined" || !observing) return;
+			var state = advance(window.__watchTrack, Date.now());
+			var view = adoptLivingEntity(observing);
+			view.real_x = state.x;
+			view.real_y = state.y;
+			if (state.bind) state.bind();
+			buildSkills(view);
+			paintSkills(view);
+			paintBuffs(view);
+			if (!lastPaint || Date.now() - lastPaint > 1000) {
+				paintHud();
+				lastPaint = Date.now();
+			}
+		}, 50);
+		window.__watchLoop = loop;
+		window.localWatch = function () {
+			attach(watched);
+			return true;
+		};
+		return true;
+	}
+
+	function bootstrap() {
+		if (typeof observe_character !== "function" || typeof socket === "undefined" || !socket) return;
+		// init_socket refuses to reconnect while the page's first connection is still in flight
+		// ("!socket_welcomed"), and attaching then leaves an observer that never receives entities.
+		if (typeof socket_welcomed !== "undefined" && !socket_welcomed) return;
+		// If the follow-up welcome arrives while assets are still loading, the client only sets
+		// socket_ready and never calls launch_game(), which is what emits "loaded" - without that the
+		// server never registers the observer and no entities arrive.
+		if (typeof resources_loaded !== "undefined" && !resources_loaded) return;
+		if (typeof user_id === "undefined" || !user_id) {
+			note("log in first, then reload ?watch=" + wanted);
+			clearInterval(timer);
+			return;
+		}
+		if (attached) {
+			clearInterval(timer);
+			return;
+		}
+		var characters = (window.X && window.X.characters) || [];
+		var watched = characters.filter(matches)[0];
+		if (!watched) {
+			refreshCharacters();
+			return;
+		}
+		if (!watched.secret) {
+			refreshCharacters();
+			return;
+		}
+		// Let the page's own connection finish settling before reconnecting: attaching in the same tick as
+		// the first welcome leaves the client with no sprite pipeline (empty entity table, nothing drawn),
+		// while a couple of seconds of settling gives the same result as observing by hand from the hub.
+		if (!readyAt) {
+			readyAt = Date.now();
+			return;
+		}
+		if (Date.now() - readyAt < 4000) return;
+		clearInterval(timer);
+		if (!attach(watched)) note("could not attach to " + watched.name);
+	}
+})();
