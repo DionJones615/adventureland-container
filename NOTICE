@@ -28,5 +28,9 @@ fetched at run time and are NOT distributed in this repository or in the images 
     https://adventure.land/data.js
     Fetched by the image build (npm run fetch-data). Not stored in this repository.
 
+The test sell point described in the README is added at container start by our own script
+(scripts/local/patch_merchants.mjs) into the locally cloned map data; only a merchant
+coordinate is written, no game source or data is redistributed.
+
 Adventure Land is created and maintained by its authors. This container is not affiliated with
 them and is intended for local use; the game's own terms govern the game.

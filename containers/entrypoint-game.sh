@@ -32,6 +32,14 @@ install_deps() {
 install_deps "$LOCAL/adventureland"
 install_deps "$LOCAL/adventureland/node"
 
+# The game ships no map merchants, and the sell handler refuses every sale unless one is within
+# B.sell_dist (400) - so a fresh clone cannot sell anything, through the UI or from a bot. Append one
+# guarded test merchant to the cloned design/maps.js before the server evaluates it.
+# AL_TEST_MERCHANT=off keeps the stack exactly as upstream ships it.
+if [ -f "$LOCAL/adventureland/design/maps.js" ]; then
+  node /app/scripts/local/patch_merchants.mjs || echo "[al-game] merchant patch failed - nothing will be sellable"
+fi
+
 # The default account is created once the backend answers (DEFAULT_EMAIL/DEFAULT_PASSWORD). The
 # seeder waits for the API itself, so it can start before the stack is ready; it is not the main
 # process, so the stack still owns the container lifetime.
