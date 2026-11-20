@@ -99,14 +99,33 @@ npm run local:down
 npm run test:unit      # fixture parsing/patch building + the account API (fake fetch), no server needed
 ```
 
+## Credits
+
+This container is a thin wrapper around other people's work. It exists because these do:
+
+| source | what it provides | pinned |
+| --- | --- | --- |
+| [kaansoral/adventureland_mongodb](https://github.com/kaansoral/adventureland_mongodb) | the Adventure Land game itself: client, game server, backend, `design/` data | [`a5c133d`](https://github.com/kaansoral/adventureland_mongodb/commit/a5c133dcc31f97edab987119517b4a60581248f6) |
+| [kaansoral/common_engine](https://github.com/kaansoral/common_engine) | the shared engine the game server is built on (mounted as `common/`) | [`fa74fab`](https://github.com/kaansoral/common_engine/commit/fa74fabf5d3782503712621e037bfb934ecb8439) |
+| [kaansoral/adventureland_secretsandconfig](https://github.com/kaansoral/adventureland_secretsandconfig) | the config keys/options template the stack boots from | [`6b3493b`](https://github.com/kaansoral/adventureland_secretsandconfig/commit/6b3493be30abe367cfaf879a2d5ad370742e0866) |
+| [adventure.land](https://adventure.land) | the game data (`data.js`) this image fetches at build: items, monsters, maps, skills | live |
+
+Those three repositories are cloned at container start and never redistributed here — see the pins in
+[`scripts/local/fetch_stack.sh`](scripts/local/fetch_stack.sh). The game is
+[Adventure Land](https://adventure.land), created and maintained by its authors; this project is not
+affiliated with them, and the container, seeding and fixture code here is original.
+
 ## Licensing
 
-The code in this repository is MIT (see `LICENSE`). The game itself is **not** included: the pinned
-`adventureland_mongodb`, `common_engine` and `secretsandconfig` repositories ship no licence, so they are cloned at
-container start into `reference/local` and git-ignored — see the `LICENSE` in the upstream repository
-(AdventureLandOnlyUse: free to use and modify, no reselling, attribution plus a crawlable link to
-<https://adventure.land> required). Game data (`data.js`) is fetched from adventure.land at image build and is not
-redistributed here. No game art, sounds or fonts are included.
+The code in this repository (container files, seeding and fixture scripts, the account API, the tests) is MIT —
+see [`LICENSE`](LICENSE).
 
-Adventure Land is created and maintained by its authors; this container exists to run the game locally and is not
-affiliated with it.
+The game is **not** included and is **not** MIT. `adventureland_mongodb`, `common_engine` and
+`adventureland_secretsandconfig` carry no separate licence beyond the `LICENSE` in the game repository
+(AdventureLandOnlyUse): free to use and modify, no reselling, no redistribution of the source or files, and
+**attribution plus a crawlable link to <https://adventure.land>**. That is why they are cloned at container start
+into `reference/local` and git-ignored instead of being baked into an image — see [Credits](#credits) for the
+repositories and the exact commits.
+
+Game data (`data.js`) is fetched from <https://adventure.land/data.js> during the image build and is not
+redistributed here either. No game art, sounds or fonts are included.

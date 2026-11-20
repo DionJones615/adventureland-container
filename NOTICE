@@ -1,0 +1,32 @@
+adventureland-container
+Copyright (c) 2026 Dion Jones
+
+The MIT licence in LICENSE covers the code in this repository only: the container definition,
+the seeding and fixture scripts, the account API and the tests.
+
+This project runs Adventure Land (https://adventure.land) and depends on the following, which are
+fetched at run time and are NOT distributed in this repository or in the images it builds:
+
+  kaansoral/adventureland_mongodb
+    https://github.com/kaansoral/adventureland_mongodb
+    pinned at a5c133dcc31f97edab987119517b4a60581248f6
+    Licence: see the LICENSE in that repository (AdventureLandOnlyUse) - use and modify freely,
+    no reselling the source or files, no redistribution, attribution and a crawlable link to
+    https://adventure.land required, licence revocable by the authors.
+
+  kaansoral/common_engine
+    https://github.com/kaansoral/common_engine
+    pinned at fa74fabf5d3782503712621e037bfb934ecb8439
+    No licence file is published; used at run time, not redistributed.
+
+  kaansoral/adventureland_secretsandconfig
+    https://github.com/kaansoral/adventureland_secretsandconfig
+    pinned at 6b3493be30abe367cfaf879a2d5ad370742e0866
+    No licence file is published; its config template is generated locally at run time.
+
+  Adventure Land game data
+    https://adventure.land/data.js
+    Fetched by the image build (npm run fetch-data). Not stored in this repository.
+
+Adventure Land is created and maintained by its authors. This container is not affiliated with
+them and is intended for local use; the game's own terms govern the game.

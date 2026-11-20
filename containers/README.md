@@ -8,6 +8,9 @@ docker build -f containers/game.Dockerfile -t localhost/al-game .
 docker run -d --name al-game -p 8090:8090 -p 7192:7192 localhost/al-game
 ```
 
+The game itself, and the three pinned repositories this container runs, are credited in the
+[root README](../README.md#credits).
+
 ## What the entrypoint does
 
 1. If `/app/reference/local` has no clone, runs `scripts/local/fetch_stack.sh` (the three pinned game
