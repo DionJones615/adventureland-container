@@ -4,8 +4,8 @@ One image, one process tree: MongoDB (single-node replica set) → backend (:809
 [`game.Dockerfile`](game.Dockerfile) builds it, [`entrypoint-game.sh`](entrypoint-game.sh) runs it.
 
 ```sh
-podman build -f containers/game.Dockerfile -t localhost/al-game .
-podman run -d --name al-game -p 8090:8090 -p 7192:7192 localhost/al-game
+docker build -f containers/game.Dockerfile -t localhost/al-game .
+docker run -d --name al-game -p 8090:8090 -p 7192:7192 localhost/al-game
 ```
 
 ## What the entrypoint does
@@ -31,7 +31,7 @@ so a slow seed can never keep the container "running but not serving".
 | `/app/reference/local` | the pinned clone + generated config + database + logs. Mount it to persist and reuse; a fresh mount triggers the clone |
 | `/app/fixtures` | read-only fixture directory; `SEED_FIXTURES=/app/fixtures/<file>.json` |
 
-On an SELinux host add `:z` to the bind mounts (`-v "$PWD/clone:/app/reference/local:z"`), otherwise the first write
+On an SELinux host add `:z` to the bind mounts (Docker accepts the option too and ignores it where SELinux is off) (`-v "$PWD/clone:/app/reference/local:z"`), otherwise the first write
 into the clone fails with `EACCES`.
 
 ## Environment

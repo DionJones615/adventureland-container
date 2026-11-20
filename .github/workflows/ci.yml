@@ -30,25 +30,16 @@ jobs:
           cache: npm
       - run: npm ci
 
-      - name: podman version
-        run: podman --version
-
-      - name: cache container layers
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.local/share/containers
-            ~/.cache/containers
-          key: podman-${{ hashFiles('containers/game.Dockerfile', 'package-lock.json') }}
-          restore-keys: podman-
+      - name: docker version
+        run: docker --version
 
       - name: build the image
-        run: podman build -f containers/game.Dockerfile -t localhost/al-game .
+        run: docker build -f containers/game.Dockerfile -t localhost/al-game .
 
       - name: start the stack with fixtures on spare ports
         run: |
           mkdir -p "$PWD/.ci-clone"
-          podman run -d --name al-game \
+          docker run -d --name al-game \
             -p 18090:8090 -p 17192:7192 \
             -e DEFAULT_EMAIL=dev@example.test \
             -e DEFAULT_PASSWORD=dev-password-123 \
@@ -68,7 +59,7 @@ jobs:
                  http://127.0.0.1:18090/api/signup_or_login | grep -q '"success":true'; then ok=1; break; fi
             sleep 5
           done
-          if [ -z "$ok" ]; then echo "the stack never accepted a login"; podman logs al-game | tail -60; exit 1; fi
+          if [ -z "$ok" ]; then echo "the stack never accepted a login"; docker logs al-game | tail -60; exit 1; fi
 
           # fixtures are applied in the background right after the account; wait for them
           for i in $(seq 1 60); do
@@ -81,12 +72,12 @@ jobs:
             fi
             sleep 5
           done
-          echo "E2EMage was never listed"; podman logs al-game | tail -60; exit 1
+          echo "E2EMage was never listed"; docker logs al-game | tail -60; exit 1
 
       - name: logs on failure
         if: failure()
-        run: podman logs al-game 2>&1 | tail -120 || true
+        run: docker logs al-game 2>&1 | tail -120 || true
 
       - name: clean up
         if: always()
-        run: podman rm -f al-game || true
+        run: docker rm -f al-game || true

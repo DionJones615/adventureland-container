@@ -9,11 +9,11 @@
     "node": ">=20"
   },
   "scripts": {
-    "container:build": "node scripts/local/podman.mjs build",
-    "container:up": "node scripts/local/podman.mjs up",
-    "container:down": "node scripts/local/podman.mjs down",
-    "container:status": "node scripts/local/podman.mjs status",
-    "container:logs": "node scripts/local/podman.mjs logs",
+    "container:build": "node scripts/local/container.mjs build",
+    "container:up": "node scripts/local/container.mjs up",
+    "container:down": "node scripts/local/container.mjs down",
+    "container:status": "node scripts/local/container.mjs status",
+    "container:logs": "node scripts/local/container.mjs logs",
     "fetch-data": "node scripts/fetch_game_data.mjs",
     "seed:account": "node scripts/local/seed_account.mjs",
     "seed:fixtures": "node scripts/local/seed_fixtures.mjs",

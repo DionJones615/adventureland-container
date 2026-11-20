@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 // The game container: MongoDB + backend + game server, one image.
 //
-//   node scripts/local/podman.mjs build
-//   node scripts/local/podman.mjs up [--fixtures containers/fixtures/e2e.json]
-//   node scripts/local/podman.mjs status
-//   node scripts/local/podman.mjs logs [-f]
-//   node scripts/local/podman.mjs down
+//   node scripts/local/container.mjs build
+//   node scripts/local/container.mjs up [--fixtures containers/fixtures/e2e.json]
+//   node scripts/local/container.mjs status
+//   node scripts/local/container.mjs logs [-f]
+//   node scripts/local/container.mjs down
 //
-// There is no bot and no pod: the container publishes the api (client + backend) and the game socket,
-// and the host connects to it like any other Adventure Land server. Everything that makes a test
-// deterministic - the default account and the character fixtures - is seeded inside the container at
-// start, driven by the environment.
+// Docker and Podman are interchangeable here: the engine is auto-detected (podman first, then
+// docker) and can be forced with AL_CONTAINER_BIN=docker. There is no bot and no pod: the container
+// publishes the api (client + backend) and the game socket, and the host connects to it like any
+// other Adventure Land server. Everything that makes a test deterministic - the default account and
+// the character fixtures - is seeded inside the container at start, driven by the environment.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { LOCAL, ROOT } from "./apply_config.mjs";
@@ -21,6 +22,17 @@ const NAME = "al-game";
 const IMAGE = "localhost/al-game";
 const CLONE = LOCAL;
 const DEFAULT_FIXTURES = path.join(ROOT, "containers/fixtures/e2e.json");
+
+function detectEngine() {
+	if (process.env.AL_CONTAINER_BIN) return process.env.AL_CONTAINER_BIN;
+	for (const candidate of ["podman", "docker"]) {
+		const probe = spawnSync(candidate, ["--version"], { stdio: "ignore" });
+		if (probe.status === 0) return candidate;
+	}
+	throw new Error("neither podman nor docker is installed (or set AL_CONTAINER_BIN)");
+}
+
+const ENGINE = detectEngine();
 
 const args = process.argv.slice(2);
 const command = args.shift() || "help";
@@ -37,7 +49,7 @@ function run(bin, argv, { quiet = false } = {}) {
 		console.log("[dry-run] " + line);
 		return Promise.resolve("");
 	}
-	if (!quiet) console.log("[podman] " + line);
+	if (!quiet) console.log("[" + ENGINE + "] " + line);
 	return new Promise((resolve, reject) => {
 		const child = spawn(bin, argv, { stdio: ["ignore", "pipe", "pipe"] });
 		let out = "";
@@ -48,9 +60,11 @@ function run(bin, argv, { quiet = false } = {}) {
 	});
 }
 
-async function exists(bin, argv) {
+const engine = (argv, options) => run(ENGINE, argv, options);
+
+async function exists(argv) {
 	try {
-		await run(bin, argv, { quiet: true });
+		await engine(argv, { quiet: true });
 		return true;
 	} catch {
 		return false;
@@ -58,7 +72,7 @@ async function exists(bin, argv) {
 }
 
 async function build() {
-	await run("podman", ["build", "-f", "containers/game.Dockerfile", "-t", IMAGE, "."]);
+	await engine(["build", "-f", "containers/game.Dockerfile", "-t", IMAGE, "."]);
 }
 
 async function up() {
@@ -87,12 +101,13 @@ async function up() {
 	}
 
 	await fs.mkdir(clone, { recursive: true });
-	await run("podman", ["rm", "-f", NAME], { quiet: true }).catch(() => {});
+	await engine(["rm", "-f", NAME], { quiet: true }).catch(() => {});
 
+	// :z is the SELinux relabel option - needed on Fedora-likes, harmless where SELinux is off.
 	const mounts = ["-v", clone + ":/app/reference/local:z"];
 	if (fixturesDir) mounts.push("-v", fixturesDir + ":/app/fixtures:ro,z");
 
-	await run("podman", [
+	await engine([
 		"run", "-d", "--name", NAME,
 		"--restart", "on-failure:5",
 		"-p", apiPort + ":8090",
@@ -103,6 +118,7 @@ async function up() {
 	]);
 
 	console.log("");
+	console.log("[al] engine " + ENGINE);
 	console.log("[al] api    http://127.0.0.1:" + apiPort + "   (client page: /?watch=<character>)");
 	console.log("[al] game   http://127.0.0.1:" + gamePort + "/socket.io/");
 	console.log("[al] clone  " + clone);
@@ -111,28 +127,28 @@ async function up() {
 }
 
 async function down() {
-	await run("podman", ["rm", "-f", NAME]).catch((error) => console.log("[al] " + error.message));
+	await engine(["rm", "-f", NAME]).catch((error) => console.log("[al] " + error.message));
 }
 
 async function status() {
-	if (!(await exists("podman", ["container", "exists", NAME]))) {
+	if (!(await exists(["container", "exists", NAME]))) {
 		console.log("[al] not running");
 		return;
 	}
-	console.log(await run("podman", ["ps", "--filter", "name=" + NAME, "--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}"], { quiet: true }));
+	console.log(await engine(["ps", "--filter", "name=" + NAME, "--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}"], { quiet: true }));
 }
 
 async function logs() {
 	const argv = ["logs", NAME];
 	if (flags.has("-f") || flags.has("--follow")) argv.push("-f");
-	const child = spawn("podman", argv, { stdio: "inherit" });
+	const child = spawn(ENGINE, argv, { stdio: "inherit" });
 	await new Promise((resolve) => child.on("close", resolve));
 }
 
 const commands = { build, up, down, status, logs };
 
 if (command === "help" || !commands[command]) {
-	const header = await fs.readFile(new URL(import.meta.url), "utf8").then((source) => source.split("\n").slice(1, 12).join("\n").replace(/^\/\/ ?/gm, ""));
+	const header = await fs.readFile(new URL(import.meta.url), "utf8").then((source) => source.split("\n").slice(1, 13).join("\n").replace(/^\/\/ ?/gm, ""));
 	console.log(header);
 	process.exit(command === "help" ? 0 : 1);
 }

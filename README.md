@@ -5,8 +5,8 @@ the account backend, and the game server. Nothing else — no bot, no protocol c
 it as the fixture-backed server for end-to-end tests.
 
 ```sh
-podman build -f containers/game.Dockerfile -t localhost/al-game .
-podman run -d --name al-game -p 8090:8090 -p 7192:7192 \
+docker build -f containers/game.Dockerfile -t localhost/al-game .
+docker run -d --name al-game -p 8090:8090 -p 7192:7192 \
   -e DEFAULT_EMAIL=dev@example.test -e DEFAULT_PASSWORD=dev-password-123 \
   -v "$PWD/containers/fixtures:/app/fixtures:ro,z" \
   -e SEED_FIXTURES=/app/fixtures/e2e.json \
@@ -18,6 +18,9 @@ podman run -d --name al-game -p 8090:8090 -p 7192:7192 \
 | client page (landing, login, `?watch=<character>`) | <http://127.0.0.1:8090/> |
 | account API | `POST http://127.0.0.1:8090/api/<method>` |
 | game socket | `http://127.0.0.1:7192/socket.io/` (and `/socket.io-msgpack/`) |
+
+Podman works exactly the same: swap `docker` for `podman`. The helper script auto-detects whichever
+engine is installed (podman first, then docker) and `AL_CONTAINER_BIN=docker` forces one.
 
 The first start clones the three pinned game repositories into `/app/reference/local` and installs their
 dependencies (`npm ci` in `adventureland/` and `adventureland/node/` - the game server declares its own in
@@ -81,7 +84,7 @@ inventory/equipment/skills/position are written into the character document, bec
 
 ## Host stack (no container)
 
-The same tree boots on the host when you want it without podman:
+The same tree boots on the host when you want it without a container:
 
 ```sh
 npm run local:fetch    # clone the pinned repositories into reference/local
