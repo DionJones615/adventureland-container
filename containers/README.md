@@ -63,4 +63,7 @@ the party side live in [adventureland-client](https://github.com/DionJones615/ad
   its packet handlers, then delivers the relay's frames through `socket.emitEvent()`;
 - everything visual is the client's own code (map, sprites, camera follow, panels);
 - a **PARTY** panel lists every publisher with hp/mp, distance, gold and the run's counters;
+- **partywatch** (a chip in that panel's header) centres the camera on the party's bounding box and
+  zooms out until everyone fits, with a name marker over each member; clicking a character row follows
+  that character instead, at the normal zoom;
 - `relay=<url>` points at another relay; without it the observer path above is used unchanged.

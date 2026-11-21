@@ -190,7 +190,10 @@
 			stamp: Date.now(),
 		});
 		function merge(entity) {
-			if (!entity || String(entity.id).toLowerCase() !== String(watched.name).toLowerCase()) return;
+			// window.__watchName is the character the page is following right now: clicking another row in
+			// the party panel retargets this tracker instead of re-binding every socket handler.
+			var followed = (typeof window !== "undefined" && window.__watchName) || watched.name;
+			if (!entity || String(entity.id).toLowerCase() !== String(followed).toLowerCase()) return;
 			if (entity.x !== undefined) {
 				state.x = entity.x;
 				state.y = entity.y;
@@ -561,6 +564,175 @@
 		banner.style.display = stale ? "block" : "none";
 	}
 
+	// ---- partywatch: one camera for the whole party ----------------------------------------------
+	//
+	// The relay sends every publisher's position, so the group can be framed as a whole: centre on the
+	// bounding box of the party members on the current map and pull the zoom back until the box fits.
+	// The client's camera math (position_map) reads the global `scale` and the map container's scale, so
+	// both move together - nothing else in the renderer needs to know.
+
+	function watchName() {
+		return window.__watchName || wanted || "";
+	}
+
+	/** Party members the relay knows about, on the map the camera is on. */
+	function partyMembers(frame) {
+		var self = (frame && frame.self) || null;
+		if (!self) return [];
+		return ((frame && frame.sources) || []).filter(function (entry) {
+			return entry && entry.map === self.map && Number.isFinite(entry.x) && Number.isFinite(entry.y);
+		});
+	}
+
+	/** The party's bounding box, or null when there is nothing to frame (fewer than two members). */
+	function partyBox(frame) {
+		var members = partyMembers(frame);
+		if (members.length < 2) return null;
+		var minX = Infinity;
+		var maxX = -Infinity;
+		var minY = Infinity;
+		var maxY = -Infinity;
+		members.forEach(function (entry) {
+			minX = Math.min(minX, entry.x);
+			maxX = Math.max(maxX, entry.x);
+			minY = Math.min(minY, entry.y);
+			maxY = Math.max(maxY, entry.y);
+		});
+		return { x: (minX + maxX) / 2, y: (minY + maxY) / 2, w: maxX - minX, h: maxY - minY, count: members.length };
+	}
+
+	function baseScale() {
+		var value = window.__watchBaseScale;
+		if (!Number.isFinite(value) || value <= 0) value = typeof scale === "number" && scale > 0 ? scale : 2;
+		return value;
+	}
+
+	/** Move the global zoom and the map container together: position_map() reads the global. */
+	function setMapScale(value) {
+		try {
+			if (typeof map === "object" && map && map.scale) {
+				if (typeof map.scale.set === "function") map.scale.set(value, value);
+				map.scale.x = value;
+				map.scale.y = value;
+			}
+		} catch (error) {
+			note("map scale failed: " + error.message);
+		}
+		scale = value;
+	}
+
+
+	/** Name markers over the canvas: at partywatch zoom the sprites are small, the labels are not. */
+	function ensureMarkers() {
+		var layer = document.getElementById("watch-markers");
+		if (layer) return layer;
+		layer = document.createElement("div");
+		layer.id = "watch-markers";
+		layer.style.cssText =
+			"position: fixed; inset: 0; pointer-events: none; z-index: 29; display: none; font: 11px monospace;";
+		buildHud().appendChild(layer);
+		return layer;
+	}
+
+	function paintMarkers() {
+		var layer = ensureMarkers();
+		var frame = window.__watchPartyFrame;
+		var self = (frame && frame.self) || null;
+		if (window.__watchMode !== "party" || !self) {
+			layer.style.display = "none";
+			return;
+		}
+		layer.style.display = "block";
+		var sources = partyMembers(frame);
+		var viewW = typeof width === "number" && width > 0 ? width : window.innerWidth;
+		var viewH = typeof height === "number" && height > 0 ? height : window.innerHeight;
+		var zoom = Number(scale) || 1;
+		var cx = viewW / 2;
+		var cy = viewH / 2;
+		var signature = sources.map(function (entry) { return entry.name; }).join("|");
+		if (layer.dataset.signature !== signature) {
+			layer.dataset.signature = signature;
+			layer.innerHTML = sources
+				.map(function (entry) {
+					return (
+						'<div class="wm" data-name="' + entry.name + '" style="position:absolute;white-space:nowrap;color:#e6edf3;text-shadow:0 0 3px #000,0 0 3px #000">' +
+						'<span class="wm-dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#6fbf73;margin-right:4px;vertical-align:middle"></span>' +
+						'<span class="wm-name"></span></div>'
+					);
+				})
+				.join("");
+		}
+		var nodes = layer.querySelectorAll(".wm");
+		for (var i = 0; i < nodes.length; i++) {
+			var node = nodes[i];
+			var entry = null;
+			for (var j = 0; j < sources.length; j++) if (sources[j].name === node.dataset.name) entry = sources[j];
+			if (!entry) continue;
+			// Same projection the renderer uses: screen = viewport centre + (world - camera) * zoom.
+			var sx = cx + (entry.x - map.real_x) * zoom;
+			var sy = cy + (entry.y - map.real_y) * zoom;
+			var margin = 26;
+			var inside = sx >= margin && sx <= viewW - margin && sy >= margin && sy <= viewH - margin;
+			var distance = Math.round(Math.sqrt(Math.pow(entry.x - map.real_x, 2) + Math.pow(entry.y - map.real_y, 2)));
+			node.style.left = Math.round(Math.max(margin, Math.min(viewW - margin, sx))) + "px";
+			node.style.top = Math.round(Math.max(margin, Math.min(viewH - margin, sy))) + "px";
+			node.style.opacity = inside ? "1" : "0.65";
+			node.querySelector(".wm-name").textContent = entry.name + (inside ? "" : "  " + distance + "u");
+			node.querySelector(".wm-dot").style.background = self.id && entry.name === self.id ? "#8fbcbb" : "#6fbf73";
+		}
+	}
+
+	/** Zoom out just enough to fit the box (plus a margin), never past the normal zoom. */
+	function fitScale(box) {
+		var viewW = (typeof width === "number" && width > 0 ? width : window.innerWidth) || 1200;
+		var viewH = (typeof height === "number" && height > 0 ? height : window.innerHeight) || 800;
+		var fit = Math.min(viewW / Math.max(1, box.w + 260), viewH / Math.max(1, box.h + 260));
+		return Math.max(0.45, Math.min(baseScale(), fit));
+	}
+
+	function enterPartyWatch() {
+		window.__watchMode = "party";
+		window.__watchCam = null;
+		// Fit at once: a slow zoom-out from the single-character zoom looks like a bug.
+		var box = partyBox(window.__watchPartyFrame);
+		setMapScale(box ? fitScale(box) : baseScale());
+		document.title = "watching the party (live)";
+		note("partywatch on (" + partyMembers(window.__watchPartyFrame).length + " members)");
+	}
+
+	function leavePartyWatch() {
+		window.__watchMode = "follow";
+		window.__watchCam = null;
+		setMapScale(baseScale());
+		document.title = "watching " + (watchName() || "the party") + " (live)";
+		note("partywatch off");
+	}
+
+	/** Follow one character from now on: re-open the stream with that name as the camera. */
+	function focusOn(name) {
+		if (!name) return;
+		if (window.__watchMode === "party") window.__watchMode = "follow";
+		window.__watchCam = null;
+		setMapScale(baseScale());
+		window.__watchName = name;
+		window.observing = null;
+		var entry = null;
+		((window.__watchPartyFrame && window.__watchPartyFrame.sources) || []).forEach(function (source) {
+			if (source && String(source.name).toLowerCase() === String(name).toLowerCase()) entry = source;
+		});
+		if (entry && window.__watchTrack) {
+			window.__watchTrack.x = entry.x;
+			window.__watchTrack.y = entry.y;
+			window.__watchTrack.going_x = entry.x;
+			window.__watchTrack.going_y = entry.y;
+			window.__watchTrack.moving = false;
+			window.__watchTrack.stamp = Date.now();
+		}
+		document.title = "watching " + name + " (live)";
+		startRelay(name);
+		note("following " + name);
+	}
+
 	function ensurePartyPanel() {
 		var panel = document.getElementById("watch-party");
 		if (panel) return panel;
@@ -568,7 +740,22 @@
 		panel.id = "watch-party";
 		panel.style.cssText =
 			"position: fixed; left: 12px; top: 296px; z-index: 31; background: rgba(8,10,14,0.88); border: 3px solid #444; " +
-			"padding: 7px 9px; font: 12px monospace; color: #d8dee9; pointer-events: none; width: 268px;";
+			"padding: 7px 9px; font: 12px monospace; color: #d8dee9; pointer-events: auto; width: 268px;";
+		// One delegated handler for the whole panel: the roster is rebuilt on every roster change, so
+		// per-row listeners would have to be re-attached. A click names either the partywatch chip or
+		// one of the characters; stopPropagation() keeps it out of the map's click handlers.
+		panel.addEventListener("click", function (event) {
+			event.stopPropagation();
+			var target = event.target;
+			var chip = target && target.closest ? target.closest(".wp-mode") : null;
+			if (chip) {
+				if (window.__watchMode === "party") leavePartyWatch();
+				else enterPartyWatch();
+				return;
+			}
+			var row = target && target.closest ? target.closest(".wp-row") : null;
+			if (row && row.dataset.name) focusOn(row.dataset.name);
+		});
 		buildHud().appendChild(panel);
 		return panel;
 	}
@@ -592,10 +779,15 @@
 		var signature = sources.map(function (entry) { return entry.name + ":" + entry.role; }).join("|");
 		if (panel.dataset.signature !== signature) {
 			panel.dataset.signature = signature;
-			var html = ['<div style="color:#8fbcbb;letter-spacing:1px;margin-bottom:6px">PARTY</div>'];
+			var html = [
+				'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
+					'<span style="color:#8fbcbb;letter-spacing:1px">PARTY</span>' +
+					'<span class="wp-mode" style="cursor:pointer;border:1px solid #3c4652;padding:1px 6px;font-size:11px;color:#8fbcbb">partywatch</span>' +
+					"</div>",
+			];
 			sources.forEach(function (entry) {
 				html.push(
-					'<div class="wp-row" data-name="' + entry.name + '" style="margin-bottom:7px">' +
+					'<div class="wp-row" data-name="' + entry.name + '" title="watch ' + entry.name + '" style="cursor:pointer;margin-bottom:7px">' +
 						'<div style="display:flex;justify-content:space-between;gap:6px">' +
 						'<span class="wp-name" style="color:#e6edf3"></span>' +
 						'<span class="wp-role" style="color:#6e7681"></span>' +
@@ -608,6 +800,13 @@
 				);
 			});
 			panel.innerHTML = html.join("");
+		}
+		var mode = panel.querySelector(".wp-mode");
+		if (mode) {
+			var on = window.__watchMode === "party";
+			mode.textContent = on ? "partywatch on" : "partywatch";
+			mode.style.background = on ? "#8fbcbb" : "transparent";
+			mode.style.color = on ? "#0b1014" : "#8fbcbb";
 		}
 		var rows = panel.querySelectorAll(".wp-row");
 		for (var i = 0; i < rows.length; i++) {
@@ -627,7 +826,9 @@
 			var counters = entry.counters || {};
 			row.querySelector(".wp-stats").textContent =
 				"atk " + (counters.attacks || 0) + "  kills " + (counters.kills || 0) + "  chests " + (counters.chests || 0) + "  sent " + (counters.sent || 0) + "  sold " + (counters.sold || 0);
-			row.style.opacity = entry.name && me.id && String(entry.name).toLowerCase() === String(me.id).toLowerCase() ? "1" : "0.85";
+			var followed = window.__watchMode !== "party" && entry.name && me.id && String(entry.name).toLowerCase() === String(me.id).toLowerCase();
+			row.style.opacity = followed ? "1" : "0.85";
+			row.style.borderLeft = followed ? "3px solid #8fbcbb" : "3px solid transparent";
 		}
 	}
 
@@ -639,6 +840,8 @@
 		setStale(false);
 		window.__watchRelay = window.__watchRelay || { frames: 0, events: 0 };
 		window.__watchRelay.frames++;
+		// Kept for the party camera and the panel clicks: every publisher's live position.
+		window.__watchPartyFrame = frame;
 		if (!frame.self) return;
 		var self = frame.self;
 		if (!window.__watchSeenSelf) {
@@ -712,20 +915,44 @@
 		if (window.__watchPinned || typeof originalPositionMap !== "function") return;
 		window.__watchPinned = true;
 		window.position_map = function () {
+			// In partywatch the zoom is settled *before* the client computes the map's screen offset: the
+			// offset is width/2 - real_x * scale, so a scale applied afterwards would lag a frame.
+			if (window.__watchMode === "party") {
+				var box = partyBox(window.__watchPartyFrame);
+				if (box && typeof scale === "number") {
+					var want = fitScale(box);
+					var next = Math.abs(want - scale) < 0.01 ? want : scale + (want - scale) * 0.35;
+					setMapScale(next);
+				}
+			}
 			originalPositionMap();
+			if (typeof map === "undefined" || !map) return;
+			if (window.__watchMode === "party") {
+				var party = partyBox(window.__watchPartyFrame);
+				if (party) {
+					var cam = window.__watchCam || (window.__watchCam = { x: party.x, y: party.y });
+					cam.x += (party.x - cam.x) * 0.25;
+					cam.y += (party.y - cam.y) * 0.25;
+					map.real_x = Math.round(cam.x);
+					map.real_y = Math.round(cam.y);
+					return;
+				}
+			}
 			var state = window.__watchTrack;
-			if (!state || typeof map === "undefined" || !map) return;
+			if (!state) return;
 			var live = observing && typeof entities !== "undefined" ? entities[observing.id] : null;
 			map.real_x = live && live.real_x !== undefined ? live.real_x : state.x;
 			map.real_y = live && live.real_y !== undefined ? live.real_y : state.y;
 		};
 	}
 
-	function startRelay() {
+	function startRelay(focusName) {
+		var name = focusName !== undefined ? focusName : watchName();
+		window.__watchName = name || "";
 		if (window.EventSource) {
 			try {
 				if (window.__watchSource) window.__watchSource.close();
-				var url = relayUrl + "/events" + (wanted ? "?watch=" + encodeURIComponent(wanted) : "");
+				var url = relayUrl + "/events" + (name ? "?watch=" + encodeURIComponent(name) : "");
 				var source = new EventSource(url);
 				window.__watchSource = source;
 				source.addEventListener("frame", function (event) {
@@ -753,6 +980,11 @@
 
 	function attachRelay() {
 		attached = wanted || "relay";
+		// The zoom the page loaded with is the "normal" zoom: partywatch pulls back from it and every
+		// switch back to a single character returns to it.
+		window.__watchBaseScale = typeof scale === "number" && scale > 0 ? scale : 2;
+		window.__watchMode = window.__watchMode || "follow";
+		window.__watchName = window.__watchName || wanted || "";
 		// The game surface is built by the injected "welcome" (its handler calls launch_game once the
 		// map is known); calling it here, before any map exists, only throws.
 		try {
@@ -766,7 +998,7 @@
 		ensurePartyPanel();
 		pinCameraToTrack();
 		document.title = "watching " + (wanted || "the party") + " (live)";
-		note("relay mode: " + (wanted || "newest publisher") + " from " + relayUrl);
+		note("relay mode: " + (watchName() || "newest publisher") + " from " + relayUrl);
 		startRelay();
 		if (window.__watchLoop) clearInterval(window.__watchLoop);
 		var lastPaint = 0;
@@ -780,6 +1012,7 @@
 			buildSkills(view);
 			paintSkills(view);
 			paintBuffs(view);
+			paintMarkers();
 			if (!lastPaint || Date.now() - lastPaint > 1000) {
 				paintHud();
 				lastPaint = Date.now();
