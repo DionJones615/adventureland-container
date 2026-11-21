@@ -576,13 +576,19 @@
 	/** The panel is built once per roster; the numbers are updated in place every frame. */
 	function paintParty(frame) {
 		var panel = ensurePartyPanel();
-		var sources = (frame && frame.sources) || [];
+		var me = (frame && frame.self) || {};
+		// Never draw in arrival order: the relay publishes to a timestamped merge, so a row would jump
+		// every frame. The watched character sits first, everyone else alphabetically.
+		var sources = ((frame && frame.sources) || []).slice().sort(function (a, b) {
+			var aFirst = String(a.name).toLowerCase() === String(me.id || "").toLowerCase() ? 0 : 1;
+			var bFirst = String(b.name).toLowerCase() === String(me.id || "").toLowerCase() ? 0 : 1;
+			return aFirst - bFirst || String(a.name).toLowerCase().localeCompare(String(b.name).toLowerCase());
+		});
 		if (sources.length < 2) {
 			panel.style.display = "none";
 			return;
 		}
 		panel.style.display = "block";
-		var me = (frame && frame.self) || {};
 		var signature = sources.map(function (entry) { return entry.name + ":" + entry.role; }).join("|");
 		if (panel.dataset.signature !== signature) {
 			panel.dataset.signature = signature;
